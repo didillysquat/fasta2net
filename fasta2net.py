@@ -44,6 +44,9 @@ class Fasta2Net:
         self.aligned_fasta = None
         self.mafft_plum_bum_exe = local["mafft-linsi"]
 
+        # nexus file
+        self.nexus_file = None
+
     def _set_aligned_fasta_interleaved_path(self):
         fasta_extension = os.path.splitext(self.fasta_file_path)
         if fasta_extension not in ['.fasta', '.fas', '.fa']:
@@ -55,8 +58,13 @@ class Fasta2Net:
 
     def make_network(self):
 
-        # now run mafft including the redirect
-        self._create_aligned_fasta()
+        self.aligned_fasta = self._create_aligned_fasta()
+
+        # we have to make the new nexus format by hand as the biopython version was putting out old versions.
+        self.nexus_file = self._splits_tree_nexus_from_fasta()
+
+
+
 
     def _create_aligned_fasta(self):
         (self.mafft_plum_bum_exe['--thread', -1, self.fasta_file_path] > self.aligned_fasta_interleaved_path)()
@@ -64,7 +72,7 @@ class Fasta2Net:
             self.aligned_fasta_interleaved_as_list = [line.rstrip() for line in f]
         self.aligned_fasta_uncropped = self._convert_interleaved_to_sequencial_fasta(
             self.aligned_fasta_interleaved_as_list)
-        self.aligned_fasta = self.crop_fasta(self.aligned_fasta_uncropped)
+        return self.crop_fasta(self.aligned_fasta_uncropped)
 
     @staticmethod
     def crop_fasta_df(aligned_fasta_as_pandas_df_to_crop):
@@ -159,8 +167,40 @@ class Fasta2Net:
             sp_fasta_file = [line.rstrip() for line in f]
         return {str(sp_fasta_file[i][1:]): sp_fasta_file[i + 1] for i in range(0, len(sp_fasta_file), 2)}
 
-
-
+    def _splits_tree_nexus_from_fasta(self):
+        new_nexus = []
+        new_nexus.append('#NEXUS')
+        new_nexus.append('BEGIN taxa;')
+        new_nexus.append('\tDIMENSIONS ntax={};'.format(int(len(self.aligned_fasta) / 2)))
+        new_nexus.append('TAXLABELS')
+        count = 1
+        for i in range(0, len(self.aligned_fasta), 2):
+            new_nexus.append('[{}]\t{}'.format(count, self.aligned_fasta[i][1:]))
+            count += 1
+        new_nexus.append(';')
+        new_nexus.append('END;')
+        new_nexus.append('BEGIN characters;')
+        new_nexus.append('\tDIMENSIONS nchar={};'.format(len(self.aligned_fasta[1])))
+        new_nexus.append('\tFORMAT')
+        new_nexus.append('\t\tdatatype=DNA')
+        new_nexus.append('\t\tmissing=?')
+        new_nexus.append('\t\tgap=-')
+        new_nexus.append('\t\tsymbols="A C G T"')
+        new_nexus.append('\t\tlabels=left')
+        new_nexus.append('\t\tinterleave=no')
+        new_nexus.append('\t;')
+        new_nexus.append('MATRIX')
+        # now put in the sequences in the style of the mammals.nex example from SplitsTree
+        for i in range(0, len(self.aligned_fasta), 2):
+            new_nexus.append('{}\t{}'.format(self.aligned_fasta[i][1:], self.aligned_fasta[i + 1].upper()))
+        new_nexus.append(';')
+        new_nexus.append('END;')
+        # finally write in the st_assumption block that will tell SplitsTree to calculate the network
+        new_nexus.append('BEGIN st_assumptions;')
+        new_nexus.append(
+            'CHARTRANSFORM=MedianJoining Epsilon=0 SpringEmbedderIterations=1000 LabelEdges=false ShowHaplotypes=false SubdivideEdges=false ScaleNodesByTaxa=true;')
+        new_nexus.append('end;')
+        return new_nexus
 
 
     def _get_colour_lists(self):
@@ -232,8 +272,7 @@ def main():
 
 
 
-    # we have to make the new nexus format by hand as the biopython version was putting out old versions.
-    new_nexus = splits_tree_nexus_from_fasta(aligned_fasta_cropped)
+
 
     # write out the new_nexus
     new_nexus_path = '{}/splitstree_in.nex'.format(output_dir)
@@ -387,40 +426,7 @@ def make_and_write_cntrl_file(ctrl_path, new_nexus_path, splits_out_path):
             f.write('{}\n'.format(line))
 
 
-def splits_tree_nexus_from_fasta(aligned_fasta):
-    new_nexus = []
-    new_nexus.append('#NEXUS')
-    new_nexus.append('BEGIN taxa;')
-    new_nexus.append('\tDIMENSIONS ntax={};'.format(int(len(aligned_fasta) / 2)))
-    new_nexus.append('TAXLABELS')
-    count = 1
-    for i in range(0, len(aligned_fasta), 2):
-        new_nexus.append('[{}]\t{}'.format(count, aligned_fasta[i][1:]))
-        count += 1
-    new_nexus.append(';')
-    new_nexus.append('END;')
-    new_nexus.append('BEGIN characters;')
-    new_nexus.append('\tDIMENSIONS nchar={};'.format(len(aligned_fasta[1])))
-    new_nexus.append('\tFORMAT')
-    new_nexus.append('\t\tdatatype=DNA')
-    new_nexus.append('\t\tmissing=?')
-    new_nexus.append('\t\tgap=-')
-    new_nexus.append('\t\tsymbols="A C G T"')
-    new_nexus.append('\t\tlabels=left')
-    new_nexus.append('\t\tinterleave=no')
-    new_nexus.append('\t;')
-    new_nexus.append('MATRIX')
-    # now put in the sequences in the style of the mammals.nex example from SplitsTree
-    for i in range(0, len(aligned_fasta), 2):
-        new_nexus.append('{}\t{}'.format(aligned_fasta[i][1:], aligned_fasta[i + 1].upper()))
-    new_nexus.append(';')
-    new_nexus.append('END;')
-    # finally write in the st_assumption block that will tell SplitsTree to calculate the network
-    new_nexus.append('BEGIN st_assumptions;')
-    new_nexus.append(
-        'CHARTRANSFORM=MedianJoining Epsilon=0 SpringEmbedderIterations=1000 LabelEdges=false ShowHaplotypes=false SubdivideEdges=false ScaleNodesByTaxa=true;')
-    new_nexus.append('end;')
-    return new_nexus
+
 
 def run_splits_trees(ctrl_path, splits_out_path):
 
