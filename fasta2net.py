@@ -1,5 +1,6 @@
-''' This programe will be aimed at creating splits tree median joining networks form fasta names pair files.
-It will be good to add colour functionality and gap functionality to it as well.'''
+"""A python wrapper for creating splits tree median joining networks.
+Inputs will be a fasta file and a name file..
+It will be good to add colour functionality and gap functionality to it as well."""
 
 # eventually the fasta and the names file will come from command line arguments but for the time being
 # we will hardcode their paths in.
@@ -16,25 +17,50 @@ import matplotlib as mpl
 mpl.use('TkAgg')
 import matplotlib.pyplot as plt
 
+
+
 def main():
+    # todo add command line functionality
 
-    output_dir = '/Users/humebc/Google_Drive/projects/barbara_forcioli/sp_networks'
-    os.makedirs(output_dir, exist_ok=True)
+    which_network = 'sp'
+    if which_network == 'sp':
+        output_dir = '/Users/humebc/Google_Drive/projects/barbara_forcioli/sp_networks'
+        os.makedirs(output_dir, exist_ok=True)
 
-    in_fasta_path = '/Users/humebc/Google_Drive/projects/barbara_forcioli/sp_seqs.fasta'
-    with open(in_fasta_path, 'r') as f:
-        sp_fasta_file = [line.rstrip() for line in f]
-    fasta_dict = {str(sp_fasta_file[i][1:]) : sp_fasta_file[i+1] for i in range(0, len(sp_fasta_file), 2)}
+        in_fasta_path = '/Users/humebc/Google_Drive/projects/barbara_forcioli/sp_seqs.fasta'
+        with open(in_fasta_path, 'r') as f:
+            sp_fasta_file = [line.rstrip() for line in f]
+        fasta_dict = {str(sp_fasta_file[i][1:]): sp_fasta_file[i + 1] for i in range(0, len(sp_fasta_file), 2)}
 
-    sp_names_path = '/Users/humebc/Google_Drive/projects/barbara_forcioli/sp.names'
-    with open(sp_names_path, 'r') as f:
-        sp_names_file = [line.rstrip() for line in f]
-    names_dict = {str(line.split('\t')[0]) : len(line.split('\t')[1].split(',')) for line in sp_names_file}
+        sp_names_path = '/Users/humebc/Google_Drive/projects/barbara_forcioli/sp.names'
+        with open(sp_names_path, 'r') as f:
+            sp_names_file = [line.rstrip() for line in f]
+        names_dict = {str(line.split('\t')[0]): len(line.split('\t')[1].split(',')) for line in sp_names_file}
 
-    colour_path = '/Users/humebc/Google_Drive/projects/barbara_forcioli/sp_colour.csv'
-    with open(colour_path, 'r') as f:
-        colour_file = [line.rstrip() for line in f]
-    colour_dict = {line.split(',')[0]: line.split(',')[1] for line in colour_file}
+        colour_path = '/Users/humebc/Google_Drive/projects/barbara_forcioli/sp_colour.csv'
+        with open(colour_path, 'r') as f:
+            colour_file = [line.rstrip() for line in f]
+        colour_dict = {line.split(',')[0]: line.split(',')[1] for line in colour_file}
+    elif which_network == 't50':
+
+
+        output_dir = '/Users/humebc/Google_Drive/projects/barbara_forcioli/t50_networks'
+        os.makedirs(output_dir, exist_ok=True)
+
+        in_fasta_path = '/Users/humebc/Google_Drive/projects/barbara_forcioli/t50_seqs.fasta'
+        with open(in_fasta_path, 'r') as f:
+            sp_fasta_file = [line.rstrip() for line in f]
+        fasta_dict = {str(sp_fasta_file[i][1:]) : sp_fasta_file[i+1] for i in range(0, len(sp_fasta_file), 2)}
+
+        sp_names_path = '/Users/humebc/Google_Drive/projects/barbara_forcioli/t50.names'
+        with open(sp_names_path, 'r') as f:
+            sp_names_file = [line.rstrip() for line in f]
+        names_dict = {str(line.split('\t')[0]) : len(line.split('\t')[1].split(',')) for line in sp_names_file}
+
+        colour_path = '/Users/humebc/Google_Drive/projects/barbara_forcioli/t50_colour.csv'
+        with open(colour_path, 'r') as f:
+            colour_file = [line.rstrip() for line in f]
+        colour_dict = {line.split(',')[0]: line.split(',')[1] for line in colour_file}
 
     # generate an abundance dict from the fasta and the abund
     seq_to_abund_dict = {}
@@ -162,9 +188,16 @@ def main():
     # https://networkx.github.io/documentation/networkx-1.9/_modules/networkx/drawing/nx_pylab.html#draw_networkx
     #
 
+    # convert the vertices back to the original sequences names so that we can label them on the networks
+    # do the same for the edges_list
+    new_vertices = ['-'.join(vertice_id_to_seq_id_dict[vert]) for vert in vertices]
 
-    g.add_nodes_from(vertices)
-    g.add_edges_from(edges_list)
+    new_edge_list = []
+    for tup in edges_list:
+        new_edge_list.append(('-'.join(vertice_id_to_seq_id_dict[tup[0]]), '-'.join(vertice_id_to_seq_id_dict[tup[1]])))
+
+    g.add_nodes_from(new_vertices)
+    g.add_edges_from(new_edge_list)
     # we should be able to
     f, ax = plt.subplots(1, 1, figsize=(10,10))
     # we will need to set the limits dynamically as we don't know what the positions are going to be.
@@ -184,9 +217,10 @@ def main():
     ax.set_ylim(min_ax_val - 0.2, max_ax_val + 0.2)
     ax.set_xlim(min_ax_val - 0.2, max_ax_val + 0.2)
     # to set the edge colour of the nodes we need to draw them seperately
-    # nx.draw_networkx_nodes(g, pos=spring_pos, node_size=vertices_sizes, with_labels=False, alpha=0.5, edgecolors='black')
-    nx.draw_networkx(g, pos=spring_pos, arrows=False, ax=ax, node_color=vertices_colours, alpha=1.0,
-                     node_size=vertices_sizes, with_labels=False)
+    nx.draw_networkx_nodes(g, pos=spring_pos, node_size=vertices_sizes, with_labels=False, alpha=1, edgecolors='black')
+    nx.draw_networkx_edges(G=g, pos=spring_pos, ax=ax)
+    # nx.draw_networkx(g, pos=spring_pos, arrows=False, ax=ax, node_color=vertices_colours, alpha=1.0,
+    #                  node_size=vertices_sizes, with_labels=True)
 
     # https://stackoverflow.com/questions/22716161/how-can-one-modify-the-outline-color-of-a-node-in-networkx
     # https://matplotlib.org/api/collections_api.html
