@@ -19,78 +19,217 @@ import matplotlib.pyplot as plt
 
 
 
+class Fasta2Net:
+    def __init__(self, output_dir, fasta_file_path, names_file_path, color_map_file_path):
+        self.cwd = os.path.dirname(os.path.realpath(__file__))
+        if output_dir is None:
+            self.output_dir = self.cwd
+        else:
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir)
+            self.output_dir = output_dir
+        self.fasta_file_path = fasta_file_path
+
+        self.names_file_path = names_file_path
+
+
+        self.fasta_dict = self._create_fasta_dict()
+        self.names_dict = self._create_names_dict()
+        self.color_dict = self._create_color_dict(color_map_file_path)
+
+        # attributes for aligning the fasta
+        self.aligned_fasta_interleaved_path = self._set_aligned_fasta_interleaved_path()
+        self.aligned_fasta_interleaved_as_list = []
+        self.aligned_fasta_uncropped = None
+        self.aligned_fasta = None
+        self.mafft_plum_bum_exe = local["mafft-linsi"]
+
+    def _set_aligned_fasta_interleaved_path(self):
+        fasta_extension = os.path.splitext(self.fasta_file_path)
+        if fasta_extension not in ['.fasta', '.fas', '.fa']:
+            raise RuntimeError('Unrecognised fasta format')
+        return os.path.join(
+            self.output_dir,
+            self.fasta_file_path.split('/')[-1].replace(fasta_extension, f'_aligned{fasta_extension}'))
+
+
+    def make_network(self):
+
+        # now run mafft including the redirect
+        self._create_aligned_fasta()
+
+    def _create_aligned_fasta(self):
+        (self.mafft_plum_bum_exe['--thread', -1, self.fasta_file_path] > self.aligned_fasta_interleaved_path)()
+        with open(self.aligned_fasta_interleaved_path, 'r') as f:
+            self.aligned_fasta_interleaved_as_list = [line.rstrip() for line in f]
+        self.aligned_fasta_uncropped = self._convert_interleaved_to_sequencial_fasta(
+            self.aligned_fasta_interleaved_as_list)
+        self.aligned_fasta = self.crop_fasta(self.aligned_fasta_uncropped)
+
+    @staticmethod
+    def crop_fasta_df(aligned_fasta_as_pandas_df_to_crop):
+        columns_to_drop = []
+        for i in list(aligned_fasta_as_pandas_df_to_crop):
+            # if there is a gap in the column at the beginning
+            if '-' in list(aligned_fasta_as_pandas_df_to_crop[i]) or '*' in list(aligned_fasta_as_pandas_df_to_crop[i]):
+                columns_to_drop.append(i)
+            else:
+                break
+        for i in reversed(list(aligned_fasta_as_pandas_df_to_crop)):
+            # if there is a gap in the column at the end
+            if '-' in list(aligned_fasta_as_pandas_df_to_crop[i]) or '*' in list(aligned_fasta_as_pandas_df_to_crop[i]):
+                columns_to_drop.append(i)
+            else:
+                break
+
+        # get a list that is the columns indices that we want to keep
+        col_to_keep = [col_index for col_index in list(aligned_fasta_as_pandas_df_to_crop) if
+                       col_index not in columns_to_drop]
+        # drop the gap columns
+        return aligned_fasta_as_pandas_df_to_crop[col_to_keep]
+
+    def crop_fasta(self, aligned_fasta):
+        # convert each of the sequences in the fasta into a series with the series name as the sequence name from the fasta
+        temp_series_list = []
+        for i in range(0, len(aligned_fasta), 2):
+            temp_series_list.append(pd.Series(list(aligned_fasta[i + 1]), name=aligned_fasta[i][1:]))
+
+        # now create the df from the list of series
+        # https://github.com/pandas-dev/pandas/issues/1494
+        aligned_fasta_as_df = pd.DataFrame.from_items([(s.name, s) for s in temp_series_list]).T
+        # aligned_fasta_as_df = pd.DataFrame(temp_series_list)
+
+        # now do the cropping
+        aligned_fasta_as_df_cropped = self.crop_fasta_df(aligned_fasta_as_df)
+
+        # now we need to convert this back to a fasta
+        output_fasta = []
+        for sequence in aligned_fasta_as_df_cropped.index.values.tolist():
+            output_fasta.extend(['>{}'.format(aligned_fasta_as_df_cropped.loc[sequence].name),
+                                 ''.join(aligned_fasta_as_df_cropped.loc[sequence].values.tolist())])
+
+        return output_fasta
+
+    @staticmethod
+    def _convert_interleaved_to_sequencial_fasta(fasta_in):
+        fasta_out = []
+        for i in range(len(fasta_in)):
+            if fasta_in[i].startswith('>'):
+                if fasta_out:
+                    # if the fasta is not empty then this is not the first
+                    fasta_out.append(temp_seq_str.upper())
+                # else then this is the first sequence and there is no need to add the seq.
+                temp_seq_str = ''
+                fasta_out.append(fasta_in[i])
+            else:
+                temp_seq_str = temp_seq_str + fasta_in[i]
+        # finally we need to add in the last sequence
+        fasta_out.append(temp_seq_str)
+        return fasta_out
+
+    def _create_color_dict(self, color_map_file_path):
+        if color_map_file_path is None:
+            # make using the list of colors
+            color_list, grey_list = self._get_colour_lists()
+            color_len = len(color_list)
+            temp_count = 0
+            temp_dict = {}
+            for seq_key in self.fasta_dict.keys():
+                if temp_count < color_len:
+                    temp_dict[seq_key] = color_list[temp_count]
+                else:
+                    temp_dict[seq_key] = grey_list[temp_count%6]
+                temp_count += 1
+            return temp_dict
+        else:
+            with open(color_map_file_path, 'r') as f:
+                colour_file = [line.rstrip() for line in f]
+            temp_dict = {line.split(',')[0]: line.split(',')[1] for line in colour_file}
+            # check that the seqs match the seqs in the colour dict
+            if set(self.fasta_dict.keys()) != set(temp_dict.keys()):
+                raise RuntimeError('Sequence in the fasta file were not found in the color map file.')
+
+    def _create_names_dict(self):
+        with open(self.names_file_path, 'r') as f:
+            sp_names_file = [line.rstrip() for line in f]
+        return {str(line.split('\t')[0]): len(line.split('\t')[1].split(',')) for line in sp_names_file}
+
+    def _create_fasta_dict(self):
+        with open(self.fasta_file_path, 'r') as f:
+            sp_fasta_file = [line.rstrip() for line in f]
+        return {str(sp_fasta_file[i][1:]): sp_fasta_file[i + 1] for i in range(0, len(sp_fasta_file), 2)}
+
+
+
+
+
+    def _get_colour_lists(self):
+        colour_palette = self._get_colour_list()
+        grey_palette = ['#D0CFD4', '#89888D', '#4A4A4C', '#8A8C82', '#D4D5D0', '#53544F']
+        return colour_palette, grey_palette
+
+    @staticmethod
+    def _get_colour_list():
+        colour_list = [
+            "#FFFF00", "#1CE6FF", "#FF34FF", "#FF4A46", "#008941", "#006FA6", "#A30059", "#FFDBE5", "#7A4900",
+            "#0000A6",
+            "#63FFAC", "#B79762", "#004D43", "#8FB0FF", "#997D87", "#5A0007", "#809693", "#FEFFE6", "#1B4400",
+            "#4FC601",
+            "#3B5DFF", "#4A3B53", "#FF2F80", "#61615A", "#BA0900", "#6B7900", "#00C2A0", "#FFAA92", "#FF90C9",
+            "#B903AA",
+            "#D16100", "#DDEFFF", "#000035", "#7B4F4B", "#A1C299", "#300018", "#0AA6D8", "#013349", "#00846F",
+            "#372101",
+            "#FFB500", "#C2FFED", "#A079BF", "#CC0744", "#C0B9B2", "#C2FF99", "#001E09", "#00489C", "#6F0062",
+            "#0CBD66",
+            "#EEC3FF", "#456D75", "#B77B68", "#7A87A1", "#788D66", "#885578", "#FAD09F", "#FF8A9A", "#D157A0",
+            "#BEC459",
+            "#456648", "#0086ED", "#886F4C", "#34362D", "#B4A8BD", "#00A6AA", "#452C2C", "#636375", "#A3C8C9",
+            "#FF913F",
+            "#938A81", "#575329", "#00FECF", "#B05B6F", "#8CD0FF", "#3B9700", "#04F757", "#C8A1A1", "#1E6E00",
+            "#7900D7",
+            "#A77500", "#6367A9", "#A05837", "#6B002C", "#772600", "#D790FF", "#9B9700", "#549E79", "#FFF69F",
+            "#201625",
+            "#72418F", "#BC23FF", "#99ADC0", "#3A2465", "#922329", "#5B4534", "#FDE8DC", "#404E55", "#0089A3",
+            "#CB7E98",
+            "#A4E804", "#324E72", "#6A3A4C", "#83AB58", "#001C1E", "#D1F7CE", "#004B28", "#C8D0F6", "#A3A489",
+            "#806C66",
+            "#222800", "#BF5650", "#E83000", "#66796D", "#DA007C", "#FF1A59", "#8ADBB4", "#1E0200", "#5B4E51",
+            "#C895C5",
+            "#320033", "#FF6832", "#66E1D3", "#CFCDAC", "#D0AC94", "#7ED379", "#012C58", "#7A7BFF", "#D68E01",
+            "#353339",
+            "#78AFA1", "#FEB2C6", "#75797C", "#837393", "#943A4D", "#B5F4FF", "#D2DCD5", "#9556BD", "#6A714A",
+            "#001325",
+            "#02525F", "#0AA3F7", "#E98176", "#DBD5DD", "#5EBCD1", "#3D4F44", "#7E6405", "#02684E", "#962B75",
+            "#8D8546",
+            "#9695C5", "#E773CE", "#D86A78", "#3E89BE", "#CA834E", "#518A87", "#5B113C", "#55813B", "#E704C4",
+            "#00005F",
+            "#A97399", "#4B8160", "#59738A", "#FF5DA7", "#F7C9BF", "#643127", "#513A01", "#6B94AA", "#51A058",
+            "#A45B02",
+            "#1D1702", "#E20027", "#E7AB63", "#4C6001", "#9C6966", "#64547B", "#97979E", "#006A66", "#391406",
+            "#F4D749",
+            "#0045D2", "#006C31", "#DDB6D0", "#7C6571", "#9FB2A4", "#00D891", "#15A08A", "#BC65E9", "#FFFFFE",
+            "#C6DC99",
+            "#203B3C", "#671190", "#6B3A64", "#F5E1FF", "#FFA0F2", "#CCAA35", "#374527", "#8BB400", "#797868",
+            "#C6005A",
+            "#3B000A", "#C86240", "#29607C", "#402334", "#7D5A44", "#CCB87C", "#B88183", "#AA5199", "#B5D6C3",
+            "#A38469",
+            "#9F94F0", "#A74571", "#B894A6", "#71BB8C", "#00B433", "#789EC9", "#6D80BA", "#953F00", "#5EFF03",
+            "#E4FFFC",
+            "#1BE177", "#BCB1E5", "#76912F", "#003109", "#0060CD", "#D20096", "#895563", "#29201D", "#5B3213",
+            "#A76F42",
+            "#89412E", "#1A3A2A", "#494B5A", "#A88C85", "#F4ABAA", "#A3F3AB", "#00C6C8", "#EA8B66", "#958A9F",
+            "#BDC9D2",
+            "#9FA064", "#BE4700", "#658188", "#83A485", "#453C23", "#47675D", "#3A3F00", "#061203", "#DFFB71",
+            "#868E7E",
+            "#98D058", "#6C8F7D", "#D7BFC2", "#3C3E6E", "#D83D66", "#2F5D9B", "#6C5E46", "#D25B88", "#5B656C",
+            "#00B57F",
+            "#545C46", "#866097", "#365D25", "#252F99", "#00CCFF", "#674E60", "#FC009C", "#92896B"]
+        return colour_list
+
 def main():
     # todo add command line functionality
 
-    which_network = 'sp'
-    if which_network == 'sp':
-        output_dir = '/Users/humebc/Google_Drive/projects/barbara_forcioli/sp_networks'
-        os.makedirs(output_dir, exist_ok=True)
 
-        in_fasta_path = '/Users/humebc/Google_Drive/projects/barbara_forcioli/sp_seqs.fasta'
-        with open(in_fasta_path, 'r') as f:
-            sp_fasta_file = [line.rstrip() for line in f]
-        fasta_dict = {str(sp_fasta_file[i][1:]): sp_fasta_file[i + 1] for i in range(0, len(sp_fasta_file), 2)}
-
-        sp_names_path = '/Users/humebc/Google_Drive/projects/barbara_forcioli/sp.names'
-        with open(sp_names_path, 'r') as f:
-            sp_names_file = [line.rstrip() for line in f]
-        names_dict = {str(line.split('\t')[0]): len(line.split('\t')[1].split(',')) for line in sp_names_file}
-
-        colour_path = '/Users/humebc/Google_Drive/projects/barbara_forcioli/sp_colour.csv'
-        with open(colour_path, 'r') as f:
-            colour_file = [line.rstrip() for line in f]
-        colour_dict = {line.split(',')[0]: line.split(',')[1] for line in colour_file}
-    elif which_network == 't50':
-
-
-        output_dir = '/Users/humebc/Google_Drive/projects/barbara_forcioli/t50_networks'
-        os.makedirs(output_dir, exist_ok=True)
-
-        in_fasta_path = '/Users/humebc/Google_Drive/projects/barbara_forcioli/t50_seqs.fasta'
-        with open(in_fasta_path, 'r') as f:
-            sp_fasta_file = [line.rstrip() for line in f]
-        fasta_dict = {str(sp_fasta_file[i][1:]) : sp_fasta_file[i+1] for i in range(0, len(sp_fasta_file), 2)}
-
-        sp_names_path = '/Users/humebc/Google_Drive/projects/barbara_forcioli/t50.names'
-        with open(sp_names_path, 'r') as f:
-            sp_names_file = [line.rstrip() for line in f]
-        names_dict = {str(line.split('\t')[0]) : len(line.split('\t')[1].split(',')) for line in sp_names_file}
-
-        colour_path = '/Users/humebc/Google_Drive/projects/barbara_forcioli/t50_colour.csv'
-        with open(colour_path, 'r') as f:
-            colour_file = [line.rstrip() for line in f]
-        colour_dict = {line.split(',')[0]: line.split(',')[1] for line in colour_file}
-
-    # generate an abundance dict from the fasta and the abund
-    seq_to_abund_dict = {}
-    for seq_name, seq_seq in fasta_dict.items():
-        seq_to_abund_dict[seq_seq] = names_dict[seq_name]
-
-
-
-    # now perform the alignment with MAFFT
-    mafft = local["mafft-linsi"]
-
-    if in_fasta_path.endswith('.fasta'):
-        out_file_path = '{}/{}'.format(output_dir, in_fasta_path.split('/')[-1].replace('.fasta', '_aligned.fasta'))
-    elif in_fasta_path.endswith('.fas'):
-        out_file_path = '{}/{}'.format(output_dir, in_fasta_path.split('/')[-1].replace('.fas', '_aligned.fasta'))
-    elif in_fasta_path.endswith('.fa'):
-        out_file_path = '{}/{}'.format(output_dir, in_fasta_path.split('/')[-1].replace('.fa', '_aligned.fasta'))
-    else:
-        sys.exit('fasta file format extension .{} not recognised'.format(in_fasta_path.split('.')[-1]))
-
-    # now run mafft including the redirect
-    (mafft['--thread', -1, in_fasta_path] > out_file_path)()
-
-    with open(out_file_path, 'r') as f:
-        aligned_fasta_interleaved = [line.rstrip() for line in f]
-
-
-    aligned_fasta = convert_interleaved_to_sequencial_fasta(aligned_fasta_interleaved)
-
-    aligned_fasta_cropped = crop_fasta(aligned_fasta)
 
 
     # we have to make the new nexus format by hand as the biopython version was putting out old versions.
@@ -248,43 +387,6 @@ def make_and_write_cntrl_file(ctrl_path, new_nexus_path, splits_out_path):
             f.write('{}\n'.format(line))
 
 
-def convert_interleaved_to_sequencial_fasta(fasta_in):
-    fasta_out = []
-    for i in range(len(fasta_in)):
-        if fasta_in[i].startswith('>'):
-            if fasta_out:
-                # if the fasta is not empty then this is not the first
-                fasta_out.append(temp_seq_str.upper())
-            #else then this is the first sequence and there is no need to add the seq.
-            temp_seq_str = ''
-            fasta_out.append(fasta_in[i])
-        else:
-            temp_seq_str = temp_seq_str + fasta_in[i]
-    #finally we need to add in the last sequence
-    fasta_out.append(temp_seq_str)
-    return fasta_out
-
-def crop_fasta(aligned_fasta):
-    # convert each of the sequences in the fasta into a series with the series name as the sequence name from the fasta
-    temp_series_list = []
-    for i in range(0, len(aligned_fasta), 2):
-        temp_series_list.append(pd.Series(list(aligned_fasta[i+1]), name=aligned_fasta[i][1:]))
-
-    # now create the df from the list of series
-    # https://github.com/pandas-dev/pandas/issues/1494
-    aligned_fasta_as_df = pd.DataFrame.from_items([(s.name, s) for s in temp_series_list]).T
-    # aligned_fasta_as_df = pd.DataFrame(temp_series_list)
-
-    # now do the cropping
-    aligned_fasta_as_df_cropped = crop_fasta_df(aligned_fasta_as_df)
-
-    # now we need to convert this back to a fasta
-    output_fasta = []
-    for sequence in aligned_fasta_as_df_cropped.index.values.tolist():
-        output_fasta.extend(['>{}'.format(aligned_fasta_as_df_cropped.loc[sequence].name), ''.join(aligned_fasta_as_df_cropped.loc[sequence].values.tolist())])
-
-    return output_fasta
-
 def splits_tree_nexus_from_fasta(aligned_fasta):
     new_nexus = []
     new_nexus.append('#NEXUS')
@@ -334,24 +436,6 @@ def run_splits_trees(ctrl_path, splits_out_path):
 
     return splits_tree_out_file
 
-def crop_fasta_df(aligned_fasta_as_pandas_df_to_crop):
-    columns_to_drop = []
-    for i in list(aligned_fasta_as_pandas_df_to_crop):
-        # if there is a gap in the column at the beginning
-        if '-' in list(aligned_fasta_as_pandas_df_to_crop[i]) or '*' in list(aligned_fasta_as_pandas_df_to_crop[i]):
-            columns_to_drop.append(i)
-        else:
-            break
-    for i in reversed(list(aligned_fasta_as_pandas_df_to_crop)):
-        # if there is a gap in the column at the end
-        if '-' in list(aligned_fasta_as_pandas_df_to_crop[i]) or '*' in list(aligned_fasta_as_pandas_df_to_crop[i]):
-            columns_to_drop.append(i)
-        else:
-            break
 
-    # get a list that is the columns indices that we want to keep
-    col_to_keep = [col_index for col_index in list(aligned_fasta_as_pandas_df_to_crop) if col_index not in columns_to_drop]
-    # drop the gap columns
-    return aligned_fasta_as_pandas_df_to_crop[col_to_keep]
 
 main()
