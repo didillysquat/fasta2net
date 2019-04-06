@@ -1,3 +1,4 @@
+#!#!/usr/bin/env python3
 """A python wrapper for creating splits tree median joining networks.
 Inputs will be a fasta file and a name file..
 It will be good to add colour functionality and gap functionality to it as well."""
@@ -7,7 +8,6 @@ It will be good to add colour functionality and gap functionality to it as well.
 # lets start by running the SP network.
 
 from plumbum import local
-import sys
 import os
 import subprocess
 import networkx as nx
@@ -16,11 +16,14 @@ import pandas as pd
 import matplotlib as mpl
 mpl.use('TkAgg')
 import matplotlib.pyplot as plt
+import argparse
 
 
 
 class Fasta2Net:
-    def __init__(self, output_dir, fasta_file_path, names_file_path, color_map_file_path, spring_pos_iterations=1000, spring_pos_k_value=0.1, labels=False, dpi=1200):
+    def __init__(
+            self, fasta_file_path ,output_dir=None,  names_file_path=None, color_map_file_path=None,
+            spring_pos_iterations=1000, spring_pos_k_value=0.1, labels=True, dpi=1200):
         self.cwd = os.path.dirname(os.path.realpath(__file__))
         if output_dir is None:
             self.output_dir = self.cwd
@@ -76,7 +79,7 @@ class Fasta2Net:
             raise RuntimeError('Unrecognised fasta format')
         return os.path.join(
             self.output_dir,
-            self.fasta_file_path.split('/')[-1].replace(fasta_extension, f'_aligned{fasta_extension}'))
+            self.fasta_file_path.split('/')[-1].replace(fasta_extension, '_aligned{}'.format(fasta_extension)))
 
 
     def make_network(self):
@@ -251,10 +254,11 @@ class Fasta2Net:
         """
         ctrl_file = []
         ctrl_file.append('BEGIN SplitsTree;')
-        ctrl_file.append(f'EXECUTE FILE={self.nexus_file_output_path};')
-        ctrl_file.append(f'SAVE FILE={self.splits_out_path} REPLACE=yes;')
+        ctrl_file.append('EXECUTE FILE={};'.format(self.nexus_file_output_path))
+        ctrl_file.append('SAVE FILE={} REPLACE=yes;'.format(self.splits_out_path))
         ctrl_file.append('QUIT;')
         ctrl_file.append('end;')
+
         # now write out the control file
         with open(self.ctrl_path, 'w') as f:
             for line in ctrl_file:
@@ -273,10 +277,10 @@ class Fasta2Net:
             self.aligned_fasta_interleaved_as_list = [line.rstrip() for line in f]
         self.aligned_fasta_uncropped = self._convert_interleaved_to_sequencial_fasta(
             self.aligned_fasta_interleaved_as_list)
-        return self.crop_fasta(self.aligned_fasta_uncropped)
+        return self._crop_fasta(self.aligned_fasta_uncropped)
 
     @staticmethod
-    def crop_fasta_df(aligned_fasta_as_pandas_df_to_crop):
+    def _crop_fasta_df(aligned_fasta_as_pandas_df_to_crop):
         columns_to_drop = []
         for i in list(aligned_fasta_as_pandas_df_to_crop):
             # if there is a gap in the column at the beginning
@@ -297,8 +301,9 @@ class Fasta2Net:
         # drop the gap columns
         return aligned_fasta_as_pandas_df_to_crop[col_to_keep]
 
-    def crop_fasta(self, aligned_fasta):
-        # convert each of the sequences in the fasta into a series with the series name as the sequence name from the fasta
+    def _crop_fasta(self, aligned_fasta):
+        # convert each of the sequences in the fasta into a series with the
+        # series name as the sequence name from the fasta
         temp_series_list = []
         for i in range(0, len(aligned_fasta), 2):
             temp_series_list.append(pd.Series(list(aligned_fasta[i + 1]), name=aligned_fasta[i][1:]))
@@ -309,7 +314,7 @@ class Fasta2Net:
         # aligned_fasta_as_df = pd.DataFrame(temp_series_list)
 
         # now do the cropping
-        aligned_fasta_as_df_cropped = self.crop_fasta_df(aligned_fasta_as_df)
+        aligned_fasta_as_df_cropped = self._crop_fasta_df(aligned_fasta_as_df)
 
         # now we need to convert this back to a fasta
         output_fasta = []
@@ -399,7 +404,8 @@ class Fasta2Net:
         # finally write in the st_assumption block that will tell SplitsTree to calculate the network
         new_nexus.append('BEGIN st_assumptions;')
         new_nexus.append(
-            'CHARTRANSFORM=MedianJoining Epsilon=0 SpringEmbedderIterations=1000 LabelEdges=false ShowHaplotypes=false SubdivideEdges=false ScaleNodesByTaxa=true;')
+            'CHARTRANSFORM=MedianJoining Epsilon=0 SpringEmbedderIterations=1000 '
+            'LabelEdges=false ShowHaplotypes=false SubdivideEdges=false ScaleNodesByTaxa=true;')
         new_nexus.append('end;')
         return new_nexus
 
@@ -468,4 +474,35 @@ class Fasta2Net:
         return colour_list
 
 if __name__ == "__main__":
-    
+    parser = argparse.ArgumentParser(
+        description='fasta2net is a Python wrapper around SplitsTrees4 '
+                    '(https://ab.inf.uni-tuebingen.de/software/splitstree4) and '
+                    'networkx (https://networkx.github.io/) to easily plot median joining networks '
+                    'from a .fasta or .fasta and .names file input.')
+    parser.add_argument("--input_fasta_path",
+                        help="The path to the fasta file to be used as input. "
+                             "This file can be passed in alone or in conjunction with a .names file.",
+                        required=True)
+    parser.add_argument("--output_dir", help="Directory in which the network figures should be output", required=False)
+    parser.add_argument("--input_names_path",
+                        help="The path to a .names file associated with the passed .fasta file.",
+                        required=False)
+    parser.add_argument("--color_map_path",
+                        help="The path to the color map file to be used for coloring the network",
+                        required=False)
+    parser.add_argument("--spring_pos_iterations", help="The number of iterations used in calculating "
+                                                        "vertice (nodes) positions. [1000]", type=int, default=1000)
+    parser.add_argument("--spring_pos_k", help='k value used in the splits tree calculation', type=float, default=0.1)
+    parser.add_argument("--no_labels", help="If this flag is passed, seq labels will not be plotted. [false]",
+                        action="store_true", default=False)
+    parser.add_argument("--fig_res", help="The resolution (dpi) to output the .png to. [1200]", type=int, default=1200)
+    args = parser.parse_args()
+    ftn = Fasta2Net(
+        fasta_file_path=args.input_fasta_path,
+        output_dir=args.output_dir,
+        names_file_path=args.input_names_path,
+        color_map_file_path=args.color_map_path,
+        spring_pos_iterations=args.spring_pos_iterations,
+        spring_pos_k_value=args.spring_pos_k,
+        labels=not args.no_labels, dpi=args.fig_res)
+    ftn.make_network()
