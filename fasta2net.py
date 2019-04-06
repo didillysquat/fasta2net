@@ -20,7 +20,7 @@ import matplotlib.pyplot as plt
 
 
 class Fasta2Net:
-    def __init__(self, output_dir, fasta_file_path, names_file_path, color_map_file_path):
+    def __init__(self, output_dir, fasta_file_path, names_file_path, color_map_file_path, spring_pos_iterations=1000, spring_pos_k_value=0.1, labels=False, dpi=1200):
         self.cwd = os.path.dirname(os.path.realpath(__file__))
         if output_dir is None:
             self.output_dir = self.cwd
@@ -31,11 +31,15 @@ class Fasta2Net:
         self.fasta_file_path = fasta_file_path
 
         self.names_file_path = names_file_path
-
-
         self.fasta_dict = self._create_fasta_dict()
         self.names_dict = self._create_names_dict()
         self.color_dict = self._create_color_dict(color_map_file_path)
+
+        # Command line variables
+        self.spring_pos_iterations = spring_pos_iterations
+        self.spring_pos_k_value = spring_pos_k_value
+        self.labels = labels
+        self.dpi = dpi
 
         # attributes for aligning the fasta
         self.aligned_fasta_interleaved_path = self._set_aligned_fasta_interleaved_path()
@@ -46,6 +50,25 @@ class Fasta2Net:
 
         # nexus file
         self.nexus_file = None
+        self.nexus_file_output_path = os.path.join(self.output_dir, 'splitstree_in.nex')
+
+        # splits tree files
+        self.splits_out_path = os.path.join(self.output_dir, 'splitstree_out.nex')
+        self.ctrl_path = os.path.join(self.output_dir, 'splitstree_ctrl')
+        self.splits_out_file = None
+        # we can work with a minimised version of the splits out file that is only the network block
+        self.splits_net_block = None
+
+        # Plotting
+        self.nex_graph = nx.Graph()
+        self.vertice_id_to_seq_id_dict = defaultdict(list)
+        self.vertice_list = None
+        self.vertice_id_to_abund_dict = {}
+        self.vertice_sizes = None
+        self.vertice_colors = None
+        self.edges_list = []
+        self.f, self.ax = plt.subplots(1, 1, figsize=(10,10))
+        self.spring_pos = None
 
     def _set_aligned_fasta_interleaved_path(self):
         fasta_extension = os.path.splitext(self.fasta_file_path)
@@ -61,10 +84,188 @@ class Fasta2Net:
         self.aligned_fasta = self._create_aligned_fasta()
 
         # we have to make the new nexus format by hand as the biopython version was putting out old versions.
+        self._make_and_write_splits_tree_nexus()
+
+        self._make_and_write_cntrl_file()
+
+        self.splits_net_block = self._run_splits_trees_and_extract_net_block()
+
+        self._get_vertices()
+
+        self._make_vertice_id_to_abund_dict()
+
+        self._infer_vertice_sizes()
+
+        self._infer_vertice_colors()
+
+        self._make_edge_list()
+
+        self._convert_vert_and_ege_names_to_seq_id_names()
+
+        self._add_vertices_to_graph_object()
+
+        self._add_edges_to_graph_object()
+
+        self._generate_spring_pos()
+
+        self._set_ax_limits()
+
+        self._draw_vertices()
+
+        self._draw_edges()
+
+        self._format_ax()
+
+        self._output_network()
+
+    def _output_network(self):
+        plt.savefig(os.path.join(self.output_dir, 'network.png'), dpi=self.dpi)
+        plt.savefig(os.path.join(self.output_dir, 'network.svg'))
+
+    def _format_ax(self):
+        """The collections that were added from the nx.draw_networkx_nodes and nx.draw_networkx_edges
+        called in self._draw_vertices and self._draw_eges can be accessed
+        to format the nodes and the edges."""
+        # https://stackoverflow.com/questions/22716161/how-can-one-modify-the-outline-color-of-a-node-in-networkx
+        # https://matplotlib.org/api/collections_api.html
+        self.ax.collections[0].set_edgecolor('grey')
+        self.ax.collections[0].set_linewidth(0.5)
+        self.ax.collections[1].set_linewidth(0.5)
+        self.ax.set_axis_off()
+
+    def _draw_vertices(self):
+        nx.draw_networkx_nodes(
+            self.nex_graph, pos=self.spring_pos, node_size=self.vertice_sizes, with_labels=self.labels, alpha=1,
+            edgecolors='black', ax=self.ax)
+    def _draw_edges(self):
+        nx.draw_networkx_edges(G=self.nex_graph, pos=self.spring_pos, ax=self.ax)
+
+    def _generate_spring_pos(self):
+        self.spring_pos = nx.spring_layout(
+            self.nex_graph, k=self.spring_pos_k_value, iterations=self.spring_pos_iterations)
+
+    def _set_ax_limits(self):
+        """We will need to set the limits dynamically as we don't know what the positions are going to be.
+    I think we will want to have the x and y limits the same so that we end up with a square
+    we will therefore just look for the bigest and smallest values, add a buffer and then set the
+    axes limits to these
+    """
+        max_ax_val = 0
+        min_ax_val = 9999
+        for vert_pos_array in self.spring_pos.values():
+            for ind in vert_pos_array:
+                if ind > max_ax_val:
+                    max_ax_val = ind
+                if ind < min_ax_val:
+                    min_ax_val = ind
+        buffer = 0.2
+        self.ax.set_ylim(min_ax_val - buffer, max_ax_val + buffer)
+        self.ax.set_xlim(min_ax_val - buffer, max_ax_val + buffer)
+
+    def _add_vertices_to_graph_object(self):
+        g.add_nodes_from(self.vertice_list)
+
+    def _add_edges_to_graph_object(self):
+        g.add_edges_from(self.edges_list)
+
+    def _convert_vert_and_ege_names_to_seq_id_names(self):
+        """Convert the vertices back to the original sequences names so that we can label them on the networks
+        do the same for the edges_list"""
+        self.vertice_list = ['-'.join(self.vertice_id_to_seq_id_dict[vert]) for vert in self.vertice_list]
+
+        new_edge_list = []
+        for tup in self.edges_list:
+            new_edge_list.append(
+                ('-'.join(self.vertice_id_to_seq_id_dict[tup[0]]), '-'.join(self.vertice_id_to_seq_id_dict[tup[1]])))
+        self.edges_list = new_edge_list
+
+    def _make_edge_list(self):
+        """The edge list should be a list of tuples
+        NB Currently we are not taking into account the length of the edges
+        """
+        for i in range(len(self.splits_net_block)):
+            if self.splits_net_block[i] == 'EDGES':
+                # for each line in the edges section
+                for j in range(i + 1, len(self.splits_net_block)):
+                    if self.splits_net_block[j] == ';':
+                        # then we have reached the end of the Edges section
+                        break
+                    items = self.splits_net_block[j].replace(',', '').split(' ')[1:]
+                    self.edges_list.append((items[0], items[1]))
+
+    def _infer_vertice_sizes(self):
+        """I haven't worked out what the size units are yet so this may need tweaking accordingly"""
+        self.vertice_sizes = [self.vertice_id_to_abund_dict[vert] * 3 for vert in self.vertice_list]
+
+    def _infer_vertice_colors(self):
+        self.vertice_colors = [self.color_dict[self.vertice_id_to_seq_id_dict[vert][0]] for vert in self.vertice_list]
+
+    def _make_vertice_id_to_abund_dict(self):
+        for vert_id in self.vertice_list:
+            count_id_list = self.vertice_id_to_seq_id_dict[vert_id]
+            if len(count_id_list) == 1:
+                abund = self.names_dict[count_id_list[0]]
+                self.vertice_id_to_abund_dict[vert_id] = abund
+            elif len(count_id_list) > 1:
+                # then we need sum the abundances for each of them
+                tot = 0
+                for count_id in count_id_list:
+                    abund = self.names_dict[count_id]
+                    tot += abund
+                self.vertice_id_to_abund_dict[vert_id] = tot
+
+    def _get_vertices(self):
+        """Get a list of the nodes
+        these can be got from the splits_tree_outfile
+        we should use the numbered system that the splits tree is using. We can get a list of the different sequences
+        that each of the taxa represent form the translate part of the network block.
+        This way we can use this to run the sequences against SP to get the names of the sequencs
+        we can also make the 'translation dictionary' at the same time"""
+        for i in range(len(self.splits_net_block)):
+            if self.splits_net_block[i] == 'TRANSLATE':
+                # for each line in the translate section
+                for j in range(i + 1, len(self.splits_net_block)):
+                    if self.splits_net_block[j] == ';':
+                        # then we have reached the end of the translation section
+                        break
+                    items = self.splits_net_block[j].replace('\'', '').replace(',', '').split(' ')
+                    self.vertice_id_to_seq_id_dict[items[0]].extend(items[1:])
+
+        self.vertice_list = list(self.vertice_id_to_seq_id_dict.keys())
+
+    def _run_splits_trees_and_extract_net_block(self):
+        # Run splitstree
+        subprocess.run(['SplitsTree', '-g', '-c', self.ctrl_path])
+
+        # Read in the output file
+        # and then we can start making the network finally!
+        with open(self.splits_out_path, 'r') as f:
+            splits_tree_out_file = [line.rstrip() for line in f]
+
+        for i in range(len(splits_tree_out_file)):
+            if splits_tree_out_file[i] == 'BEGIN Network;':
+                return splits_tree_out_file[i:]
+
+    def _make_and_write_cntrl_file(self):
+        """This creates a control file that can be fed to splits tree on the command line and writes it out
+        """
+        ctrl_file = []
+        ctrl_file.append('BEGIN SplitsTree;')
+        ctrl_file.append(f'EXECUTE FILE={self.nexus_file_output_path};')
+        ctrl_file.append(f'SAVE FILE={self.splits_out_path} REPLACE=yes;')
+        ctrl_file.append('QUIT;')
+        ctrl_file.append('end;')
+        # now write out the control file
+        with open(self.ctrl_path, 'w') as f:
+            for line in ctrl_file:
+                f.write('{}\n'.format(line))
+
+    def _make_and_write_splits_tree_nexus(self):
         self.nexus_file = self._splits_tree_nexus_from_fasta()
-
-
-
+        # write out the new_nexus
+        with open(self.nexus_file_output_path, 'w') as f:
+            for line in self.nexus_file:
+                f.write('{}\n'.format(line))
 
     def _create_aligned_fasta(self):
         (self.mafft_plum_bum_exe['--thread', -1, self.fasta_file_path] > self.aligned_fasta_interleaved_path)()
@@ -266,182 +467,5 @@ class Fasta2Net:
             "#545C46", "#866097", "#365D25", "#252F99", "#00CCFF", "#674E60", "#FC009C", "#92896B"]
         return colour_list
 
-def main():
-    # todo add command line functionality
-
-
-
-
-
-
-    # write out the new_nexus
-    new_nexus_path = '{}/splitstree_in.nex'.format(output_dir)
-    with open(new_nexus_path, 'w') as f:
-        for line in new_nexus:
-            f.write('{}\n'.format(line))
-
-
-    # now create the control file that we can use for execution for the no med
-    splits_out_path = '{}/splitstree_out.nex'.format(output_dir)
-    ctrl_path = '{}/splitstree_ctrl'.format(output_dir)
-
-    make_and_write_cntrl_file(ctrl_path, new_nexus_path, splits_out_path)
-
-    # this creates a control file that can be fed to splits tree on the command line and write it out
-    # it then runs splitstrees with the cntrl file before returning the output file
-    splits_tree_out_file = run_splits_trees(ctrl_path=ctrl_path, splits_out_path=splits_out_path)
-
-
-    # networkx graph object
-    g = nx.Graph()
-
-    # we can work with a minimised version of the splits out file that is only the network block
-    for i in range(len(splits_tree_out_file)):
-        if splits_tree_out_file[i] == 'BEGIN Network;':
-            network_block = splits_tree_out_file[i:]
-            break
-
-    # here we can now work with the network_block rather than the larger splits_tree_out_file
-    # get a list of the nodes
-    # these can be got from the splits_tree_outfile
-    # we should use the numbered system that the splits tree is using. We can get a list of the different sequences
-    # that each of the taxa represent form the translate part of the network block.
-    # This way we can use this to run the sequences against SP to get the names of the sequencs
-    # we can also make the 'translation dictionary' at the same time
-    vertice_id_to_seq_id_dict = defaultdict(list)
-    for i in range(len(network_block)):
-        if network_block[i] == 'TRANSLATE':
-            # for each line in the translate section
-            for j in range(i + 1, len(network_block)):
-                if network_block[j] == ';':
-                    # then we have reached the end of the translation section
-                    break
-                items = network_block[j].replace('\'', '').replace(',', '').split(' ')
-                vertice_id_to_seq_id_dict[items[0]].extend(items[1:])
-
-    vertices = list(vertice_id_to_seq_id_dict.keys())
-
-    # here we will use the dictionary that was created in the previous method (passed into this one)
-    # to link the count id to the actual sequence, which can then be used to look up the abundance
-    # This way we can have a vertice_id_to_rel_abund dict that we can use to put a size to the nodes
-
-    vertice_id_to_abund_dict = {}
-    for vert_id in vertices:
-        count_id_list = vertice_id_to_seq_id_dict[vert_id]
-        if len(count_id_list) == 1:
-            abund = names_dict[count_id_list[0]]
-            vertice_id_to_abund_dict[vert_id] = abund
-        elif len(count_id_list) > 1:
-            # then we need sum the abundances for each of them
-            tot = 0
-            for count_id in count_id_list:
-                abund = names_dict[count_id]
-                tot += abund
-            vertice_id_to_abund_dict[vert_id] = tot
-
-    # the sizes are a little tricky to work out becauase I'm not acutally sure what the units are, possibly pixels
-    # lets work where if there was only 1 sequence it would be a size of 1000
-    # therefore each vertice will be a node size that is the re_abund * 1000
-    # NB the size does appear to be something similar to pixels
-    vertices_sizes = [vertice_id_to_abund_dict[vert] * 3 for vert in vertices]
-
-    # need to create a colour list for the nodes as well
-    vertices_colours = [colour_dict[vertice_id_to_seq_id_dict[vert][0]] for vert in vertices]
-
-
-    # the edge list should be a list of tuples
-    # currently we are not taking into account the length of the vertices
-    edges_list = []
-    for i in range(len(network_block)):
-        if network_block[i] == 'EDGES':
-            # for each line in the edges section
-            for j in range(i + 1, len(network_block)):
-                if network_block[j] == ';':
-                    # then we have reached the end of the Edges section
-                    break
-                items = network_block[j].replace(',', '').split(' ')[1:]
-                edges_list.append((items[0], items[1]))
-
-    # THis is useful, scroll down to where the 'def draw_networkx(......' is
-    # https://networkx.github.io/documentation/networkx-1.9/_modules/networkx/drawing/nx_pylab.html#draw_networkx
-    #
-
-    # convert the vertices back to the original sequences names so that we can label them on the networks
-    # do the same for the edges_list
-    new_vertices = ['-'.join(vertice_id_to_seq_id_dict[vert]) for vert in vertices]
-
-    new_edge_list = []
-    for tup in edges_list:
-        new_edge_list.append(('-'.join(vertice_id_to_seq_id_dict[tup[0]]), '-'.join(vertice_id_to_seq_id_dict[tup[1]])))
-
-    g.add_nodes_from(new_vertices)
-    g.add_edges_from(new_edge_list)
-    # we should be able to
-    f, ax = plt.subplots(1, 1, figsize=(10,10))
-    # we will need to set the limits dynamically as we don't know what the positions are going to be.
-    # I think we will want to have the x and y limits the same so that we end up with a square
-    # we will therefore just look for the bigest and smallest values, add a buffer and then set the
-    # axes limits to thsee
-    spring_pos = nx.spring_layout(g, k=0.1, iterations=10000)
-    max_ax_val = 0
-    min_ax_val = 9999
-    for vert_pos_array in spring_pos.values():
-        for ind in vert_pos_array:
-            if ind > max_ax_val:
-                max_ax_val = ind
-            if ind < min_ax_val:
-                min_ax_val = ind
-
-    ax.set_ylim(min_ax_val - 0.2, max_ax_val + 0.2)
-    ax.set_xlim(min_ax_val - 0.2, max_ax_val + 0.2)
-    # to set the edge colour of the nodes we need to draw them seperately
-    nx.draw_networkx_nodes(g, pos=spring_pos, node_size=vertices_sizes, with_labels=False, alpha=1, edgecolors='black')
-    nx.draw_networkx_edges(G=g, pos=spring_pos, ax=ax)
-    # nx.draw_networkx(g, pos=spring_pos, arrows=False, ax=ax, node_color=vertices_colours, alpha=1.0,
-    #                  node_size=vertices_sizes, with_labels=True)
-
-    # https://stackoverflow.com/questions/22716161/how-can-one-modify-the-outline-color-of-a-node-in-networkx
-    # https://matplotlib.org/api/collections_api.html
-    ax.collections[0].set_edgecolor('grey')
-    ax.collections[0].set_linewidth(0.5)
-    ax.collections[1].set_linewidth(0.5)
-    ax.set_axis_off()
-    # ax.set_title(type_id)
-    apples = 'asdf'
-    plt.savefig('{}/sp_network_s3_k0.1.png'.format(output_dir), dpi=1200)
-    plt.savefig('{}/sp_network_s3_k0.1.svg'.format(output_dir))
-
-
-
-def make_and_write_cntrl_file(ctrl_path, new_nexus_path, splits_out_path):
-    ctrl_file = []
-    ctrl_file.append('BEGIN SplitsTree;')
-    ctrl_file.append('EXECUTE FILE={};'.format(new_nexus_path))
-    ctrl_file.append('SAVE FILE={} REPLACE=yes;'.format(splits_out_path))
-    ctrl_file.append('QUIT;')
-    ctrl_file.append('end;')
-    # now write out the control file
-    with open(ctrl_path, 'w') as f:
-        for line in ctrl_file:
-            f.write('{}\n'.format(line))
-
-
-
-
-def run_splits_trees(ctrl_path, splits_out_path):
-
-
-    # now run splitstree
-    completedProcess = subprocess.run(
-        ['SplitsTree', '-g', '-c', ctrl_path])
-
-    # now we can read in the output file
-    # and then we can start making the network finally!
-    with open(splits_out_path, 'r') as f:
-        splits_tree_out_file = [line.rstrip() for line in f]
-
-    return splits_tree_out_file
-
-
-
-main()
+if __name__ == "__main__":
+    
