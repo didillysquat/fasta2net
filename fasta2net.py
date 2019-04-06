@@ -17,6 +17,7 @@ import matplotlib as mpl
 mpl.use('TkAgg')
 import matplotlib.pyplot as plt
 import argparse
+from Bio import SeqIO
 
 
 
@@ -24,21 +25,27 @@ class Fasta2Net:
     def __init__(
             self, fasta_file_path ,output_dir=None,  names_file_path=None, color_map_file_path=None,
             spring_pos_iterations=1000, spring_pos_k_value=0.1, labels=True, dpi=1200):
+
+        # Directories
         self.cwd = os.path.dirname(os.path.realpath(__file__))
         if output_dir is None:
             self.output_dir = self.cwd
         else:
-            if not os.path.exists(output_dir):
-                os.makedirs(output_dir)
-            self.output_dir = output_dir
-        self.fasta_file_path = fasta_file_path
+            if not os.path.exists(os.path.abspath(output_dir)):
+                os.makedirs(os.path.abspath(output_dir))
+            self.output_dir = os.path.abspath(output_dir)
 
+        # Sequences
+        self.fasta_file_path = fasta_file_path
+        self.seqs = []
         self.names_file_path = names_file_path
-        self.fasta_dict = self._create_fasta_dict()
-        self.names_dict = self._create_names_dict()
-        self.color_dict = self._create_color_dict(color_map_file_path)
+        if self.names_file_path is None:
+            self._init_seqs_list_no_names_file()
+        else:
+            self._init_seqs_list_with_names_file()
 
         # Command line variables
+        self.color_dict = self._create_color_dict(color_map_file_path)
         self.spring_pos_iterations = spring_pos_iterations
         self.spring_pos_k_value = spring_pos_k_value
         self.labels = labels
@@ -73,8 +80,33 @@ class Fasta2Net:
         self.f, self.ax = plt.subplots(1, 1, figsize=(10,10))
         self.spring_pos = None
 
+    def _init_seqs_list_with_names_file(self):
+        # If name file present then there is no need to unique. We get abundances from
+        # the names file
+        abund_dict = self._create_names_dict()
+        fasta_dict = SeqIO.to_dict(SeqIO.parse(self.fasta_file_path, "fasta"))
+        for k, v in abund_dict:
+            self.seqs.append(VerticeRecord(rep_name=k, seq=fasta_dict[k]._data, abund=v))
+
+    def _init_seqs_list_no_names_file(self):
+        # If no name file then we need to do the uniqueing of the fasta ourselves
+        # dictionary that will hold sequence to representative name
+        rep_seq_dict = {}
+        counter_dict = defaultdict(int)
+        unique_seq_set = set()
+        for record in list(SeqIO.parse(open(self.fasta_file_path), 'fasta')):
+            sequence = record.seq._data
+            if sequence not in unique_seq_set:
+                counter_dict[sequence] = 1
+                rep_seq_dict[sequence] = record.name
+                unique_seq_set.add(sequence)
+            else:
+                counter_dict[sequence] += 1
+        for k, v in counter_dict.items():
+            self.seqs.append(VerticeRecord(rep_name=rep_seq_dict[k], seq=k, abund=v))
+
     def _set_aligned_fasta_interleaved_path(self):
-        fasta_extension = os.path.splitext(self.fasta_file_path)
+        fasta_extension = os.path.splitext(self.fasta_file_path)[1]
         if fasta_extension not in ['.fasta', '.fas', '.fa']:
             raise RuntimeError('Unrecognised fasta format')
         return os.path.join(
@@ -166,10 +198,10 @@ class Fasta2Net:
         self.ax.set_xlim(min_ax_val - buffer, max_ax_val + buffer)
 
     def _add_vertices_to_graph_object(self):
-        g.add_nodes_from(self.vertice_list)
+        self.nex_graph.add_nodes_from(self.vertice_list)
 
     def _add_edges_to_graph_object(self):
-        g.add_edges_from(self.edges_list)
+        self.nex_graph.add_edges_from(self.edges_list)
 
     def _convert_vert_and_ege_names_to_seq_id_names(self):
         """Convert the vertices back to the original sequences names so that we can label them on the networks
@@ -348,11 +380,11 @@ class Fasta2Net:
             color_len = len(color_list)
             temp_count = 0
             temp_dict = {}
-            for seq_key in self.fasta_dict.keys():
+            for seq in self.seqs:
                 if temp_count < color_len:
-                    temp_dict[seq_key] = color_list[temp_count]
+                    temp_dict[seq.rep_name] = color_list[temp_count]
                 else:
-                    temp_dict[seq_key] = grey_list[temp_count%6]
+                    temp_dict[seq.rep_name] = grey_list[temp_count%6]
                 temp_count += 1
             return temp_dict
         else:
@@ -360,8 +392,10 @@ class Fasta2Net:
                 colour_file = [line.rstrip() for line in f]
             temp_dict = {line.split(',')[0]: line.split(',')[1] for line in colour_file}
             # check that the seqs match the seqs in the colour dict
-            if set(self.fasta_dict.keys()) != set(temp_dict.keys()):
+            if set([vert.seq for vert in self.seqs]) != set(temp_dict.keys()):
                 raise RuntimeError('Sequence in the fasta file were not found in the color map file.')
+            else:
+                return temp_dict
 
     def _create_names_dict(self):
         with open(self.names_file_path, 'r') as f:
@@ -473,6 +507,18 @@ class Fasta2Net:
             "#545C46", "#866097", "#365D25", "#252F99", "#00CCFF", "#674E60", "#FC009C", "#92896B"]
         return colour_list
 
+class VerticeRecord:
+    """Class for keeping track of each unique sequence. A simplified version of the
+    BioPython SeqRecord specifically for our pruposes."""
+    def __init__(self, rep_name, abund, seq):
+        # representative name for teh sequence
+        self.rep_name = rep_name
+        self.abundance = abund
+        self.sequence = seq
+
+    def __repr__(self):
+        return self.rep_name
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description='fasta2net is a Python wrapper around SplitsTrees4 '
@@ -496,7 +542,10 @@ if __name__ == "__main__":
     parser.add_argument("--no_labels", help="If this flag is passed, seq labels will not be plotted. [false]",
                         action="store_true", default=False)
     parser.add_argument("--fig_res", help="The resolution (dpi) to output the .png to. [1200]", type=int, default=1200)
-    args = parser.parse_args()
+    args = parser.parse_args(["--input_fasta_path", "data/test_no_name.fasta", "--output_dir", "data"])
+    # args = parser.parse_args()
+    # for arg_val in args:
+    #     print(arg_val)
     ftn = Fasta2Net(
         fasta_file_path=args.input_fasta_path,
         output_dir=args.output_dir,
