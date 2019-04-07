@@ -36,13 +36,19 @@ class Fasta2Net:
             self.output_dir = os.path.abspath(output_dir)
 
         # Sequences
-        self.fasta_file_path = fasta_file_path
-        self.seqs = []
-        self.names_file_path = names_file_path
+        self.fasta_file_path = os.path.abspath(fasta_file_path)
+        self.fasta_extension = os.path.splitext(self.fasta_file_path)[1]
+        self.seqs_dict = {}
+        if names_file_path is not None:
+            self.names_file_path = os.path.abspath(names_file_path)
+        else:
+            self.names_file_path = names_file_path
         if self.names_file_path is None:
             self._init_seqs_list_no_names_file()
         else:
             self._init_seqs_list_with_names_file()
+
+
 
         # Command line variables
         self.color_dict = self._create_color_dict(color_map_file_path)
@@ -59,6 +65,7 @@ class Fasta2Net:
         self.mafft_plum_bum_exe = local["mafft-linsi"]
 
         # nexus file
+        self.alignment_fasta_in_path = self._set_nexus_fasta_in_path()
         self.nexus_file = None
         self.nexus_file_output_path = os.path.join(self.output_dir, 'splitstree_in.nex')
 
@@ -80,41 +87,46 @@ class Fasta2Net:
         self.f, self.ax = plt.subplots(1, 1, figsize=(10,10))
         self.spring_pos = None
 
+    def _set_nexus_fasta_in_path(self):
+        return os.path.abspath(os.path.join(os.path.dirname(self.fasta_file_path), self.fasta_file_path.split('/')[-1].replace(self.fasta_extension, '_alignment_in{}'.format(self.fasta_extension))))
+
     def _init_seqs_list_with_names_file(self):
         # If name file present then there is no need to unique. We get abundances from
         # the names file
         abund_dict = self._create_names_dict()
         fasta_dict = SeqIO.to_dict(SeqIO.parse(self.fasta_file_path, "fasta"))
-        for k, v in abund_dict:
-            self.seqs.append(VerticeRecord(rep_name=k, seq=fasta_dict[k]._data, abund=v))
+        for k, v in abund_dict.items():
+            self.seqs_dict[k] = VerticeRecord(rep_name=k, seq=fasta_dict[k].seq._data, abund=v)
 
     def _init_seqs_list_no_names_file(self):
         # If no name file then we need to do the uniqueing of the fasta ourselves
         # dictionary that will hold sequence to representative name
         rep_seq_dict = {}
-        counter_dict = defaultdict(int)
+        abund_dict = defaultdict(int)
         unique_seq_set = set()
-        for record in list(SeqIO.parse(open(self.fasta_file_path), 'fasta')):
+        fasta_dict = SeqIO.to_dict(SeqIO.parse(self.fasta_file_path, "fasta"))
+        for record_name, record in fasta_dict.items():
             sequence = record.seq._data
             if sequence not in unique_seq_set:
-                counter_dict[sequence] = 1
-                rep_seq_dict[sequence] = record.name
+                abund_dict[record_name] = 1
+                rep_seq_dict[sequence] = record_name
                 unique_seq_set.add(sequence)
             else:
-                counter_dict[sequence] += 1
-        for k, v in counter_dict.items():
-            self.seqs.append(VerticeRecord(rep_name=rep_seq_dict[k], seq=k, abund=v))
+                abund_dict[rep_seq_dict[sequence]] += 1
+        for k, v in abund_dict.items():
+            self.seqs_dict[k] = VerticeRecord(rep_name=k, seq=fasta_dict[k].seq._data, abund=v)
 
     def _set_aligned_fasta_interleaved_path(self):
-        fasta_extension = os.path.splitext(self.fasta_file_path)[1]
-        if fasta_extension not in ['.fasta', '.fas', '.fa']:
+        if self.fasta_extension not in ['.fasta', '.fas', '.fa']:
             raise RuntimeError('Unrecognised fasta format')
         return os.path.join(
             self.output_dir,
-            self.fasta_file_path.split('/')[-1].replace(fasta_extension, '_aligned{}'.format(fasta_extension)))
+            self.fasta_file_path.split('/')[-1].replace(self.fasta_extension, '_aligned{}'.format(self.fasta_extension)))
 
 
     def make_network(self):
+
+        self._write_out_fasta_for_nexus_in()
 
         self.aligned_fasta = self._create_aligned_fasta()
 
@@ -153,9 +165,17 @@ class Fasta2Net:
 
         self._output_network()
 
+    def _write_out_fasta_for_nexus_in(self):
+        with open(self.alignment_fasta_in_path, 'w') as f:
+            for vert_record in self.seqs_dict.values():
+                f.write('>{}\n'.format(vert_record.rep_name))
+                f.write('{}\n'.format(vert_record.sequence))
+
     def _output_network(self):
-        plt.savefig(os.path.join(self.output_dir, 'network.png'), dpi=self.dpi)
-        plt.savefig(os.path.join(self.output_dir, 'network.svg'))
+        png_name = os.path.split(self.fasta_file_path)[1].replace(self.fasta_extension, '_network.png')
+        svg_name = os.path.split(self.fasta_file_path)[1].replace(self.fasta_extension, '_network.svg')
+        plt.savefig(os.path.join(self.output_dir, png_name), dpi=self.dpi)
+        plt.savefig(os.path.join(self.output_dir, svg_name))
 
     def _format_ax(self):
         """The collections that were added from the nx.draw_networkx_nodes and nx.draw_networkx_edges
@@ -239,13 +259,13 @@ class Fasta2Net:
         for vert_id in self.vertice_list:
             count_id_list = self.vertice_id_to_seq_id_dict[vert_id]
             if len(count_id_list) == 1:
-                abund = self.names_dict[count_id_list[0]]
+                abund = self.seqs_dict[count_id_list[0]].abundance
                 self.vertice_id_to_abund_dict[vert_id] = abund
             elif len(count_id_list) > 1:
                 # then we need sum the abundances for each of them
                 tot = 0
                 for count_id in count_id_list:
-                    abund = self.names_dict[count_id]
+                    abund = self.seqs_dict[count_id].abundance
                     tot += abund
                 self.vertice_id_to_abund_dict[vert_id] = tot
 
@@ -304,7 +324,7 @@ class Fasta2Net:
                 f.write('{}\n'.format(line))
 
     def _create_aligned_fasta(self):
-        (self.mafft_plum_bum_exe['--thread', -1, self.fasta_file_path] > self.aligned_fasta_interleaved_path)()
+        (self.mafft_plum_bum_exe['--thread', -1, self.alignment_fasta_in_path] > self.aligned_fasta_interleaved_path)()
         with open(self.aligned_fasta_interleaved_path, 'r') as f:
             self.aligned_fasta_interleaved_as_list = [line.rstrip() for line in f]
         self.aligned_fasta_uncropped = self._convert_interleaved_to_sequencial_fasta(
@@ -370,7 +390,7 @@ class Fasta2Net:
             else:
                 temp_seq_str = temp_seq_str + fasta_in[i]
         # finally we need to add in the last sequence
-        fasta_out.append(temp_seq_str)
+        fasta_out.append(temp_seq_str.upper())
         return fasta_out
 
     def _create_color_dict(self, color_map_file_path):
@@ -380,7 +400,7 @@ class Fasta2Net:
             color_len = len(color_list)
             temp_count = 0
             temp_dict = {}
-            for seq in self.seqs:
+            for seq in self.seqs_dict.values():
                 if temp_count < color_len:
                     temp_dict[seq.rep_name] = color_list[temp_count]
                 else:
@@ -392,7 +412,7 @@ class Fasta2Net:
                 colour_file = [line.rstrip() for line in f]
             temp_dict = {line.split(',')[0]: line.split(',')[1] for line in colour_file}
             # check that the seqs match the seqs in the colour dict
-            if set([vert.seq for vert in self.seqs]) != set(temp_dict.keys()):
+            if set([vert.seq for vert in self.seqs_dict]) != set(temp_dict.keys()):
                 raise RuntimeError('Sequence in the fasta file were not found in the color map file.')
             else:
                 return temp_dict
@@ -542,7 +562,7 @@ if __name__ == "__main__":
     parser.add_argument("--no_labels", help="If this flag is passed, seq labels will not be plotted. [false]",
                         action="store_true", default=False)
     parser.add_argument("--fig_res", help="The resolution (dpi) to output the .png to. [1200]", type=int, default=1200)
-    args = parser.parse_args(["--input_fasta_path", "data/test_no_name.fasta", "--output_dir", "data"])
+    args = parser.parse_args(["--input_fasta_path", "data/test_one_with_name.fasta", "--output_dir", "data", "--input_names_path", "data/test_one_with_name.names"])
     # args = parser.parse_args()
     # for arg_val in args:
     #     print(arg_val)
