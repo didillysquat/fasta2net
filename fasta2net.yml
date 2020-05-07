@@ -1,0 +1,13 @@
+name: fasta2net 
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3
+  - numpy
+  - biopython
+  - matplotlib
+  - pandas
+  - plumbum
+  - mafft
+  - networkx

@@ -1,4 +1,4 @@
-#!#!/usr/bin/env python3
+#!/usr/bin/env python3
 """A python wrapper for creating splits tree median joining networks.
 Inputs will be a fasta file and a name file..
 It will be good to add colour functionality and gap functionality to it as well."""
@@ -79,7 +79,7 @@ class Fasta2Net:
         # Plotting
         self.nex_graph = nx.Graph()
         self.vertice_id_to_seq_id_dict = defaultdict(list)
-        self.vertice_list = None
+        self.vertice_list = []
         self.vertice_id_to_abund_dict = {}
         self.vertice_sizes = None
         self.vertice_colors = None
@@ -226,12 +226,26 @@ class Fasta2Net:
     def _convert_vert_and_ege_names_to_seq_id_names(self):
         """Convert the vertices back to the original sequences names so that we can label them on the networks
         do the same for the edges_list"""
-        self.vertice_list = ['-'.join(self.vertice_id_to_seq_id_dict[vert]) for vert in self.vertice_list]
-
+        new_vert_list = []
+        for vert in self.vertice_list:
+            if 'no_name' in self.vertice_id_to_seq_id_dict[vert]:
+                new_vert_list.append(self.vertice_id_to_seq_id_dict[vert])
+            else:
+                new_vert_list.append('-'.join(self.vertice_id_to_seq_id_dict[vert]))
+        self.vertice_list = new_vert_list
         new_edge_list = []
         for tup in self.edges_list:
+            if 'no_name' in self.vertice_id_to_seq_id_dict[tup[0]]:
+                tup_0_name = self.vertice_id_to_seq_id_dict[tup[0]]
+            else:
+                tup_0_name = '-'.join(self.vertice_id_to_seq_id_dict[tup[0]])
+            if 'no_name' in self.vertice_id_to_seq_id_dict[tup[1]]:
+                tup_1_name = self.vertice_id_to_seq_id_dict[tup[1]]
+            else:
+                tup_1_name = '-'.join(self.vertice_id_to_seq_id_dict[tup[1]])
+
             new_edge_list.append(
-                ('-'.join(self.vertice_id_to_seq_id_dict[tup[0]]), '-'.join(self.vertice_id_to_seq_id_dict[tup[1]])))
+                (tup_0_name, tup_1_name))
         self.edges_list = new_edge_list
 
     def _make_edge_list(self):
@@ -245,18 +259,23 @@ class Fasta2Net:
                     if self.splits_net_block[j] == ';':
                         # then we have reached the end of the Edges section
                         break
-                    items = self.splits_net_block[j].replace(',', '').split(' ')[1:]
-                    self.edges_list.append((items[0], items[1]))
+                    items = self.splits_net_block[j].replace(',', '').split(' ')
+                    self.edges_list.append((items[1], items[2]))
+                    if items[1] == '' or items[2] == '':
+                        foo = 'bar'
 
     def _infer_vertice_sizes(self):
         """I haven't worked out what the size units are yet so this may need tweaking accordingly"""
         self.vertice_sizes = [self.vertice_id_to_abund_dict[vert] * 3 for vert in self.vertice_list]
 
     def _infer_vertice_colors(self):
-        self.vertice_colors = [self.color_dict[self.vertice_id_to_seq_id_dict[vert][0]] for vert in self.vertice_list]
+        self.vertice_colors = [self.color_dict[self.vertice_id_to_seq_id_dict[vert][0]] if 'no_name' not in self.vertice_id_to_seq_id_dict[vert] else 'red' for vert in self.vertice_list]
 
     def _make_vertice_id_to_abund_dict(self):
         for vert_id in self.vertice_list:
+            if 'no_name' in self.vertice_id_to_seq_id_dict[vert_id]:
+                self.vertice_id_to_abund_dict[vert_id] = 1
+                continue
             count_id_list = self.vertice_id_to_seq_id_dict[vert_id]
             if len(count_id_list) == 1:
                 abund = self.seqs_dict[count_id_list[0]].abundance
@@ -275,7 +294,21 @@ class Fasta2Net:
         we should use the numbered system that the splits tree is using. We can get a list of the different sequences
         that each of the taxa represent form the translate part of the network block.
         This way we can use this to run the sequences against SP to get the names of the sequencs
-        we can also make the 'translation dictionary' at the same time"""
+        we can also make the 'translation dictionary' at the same time.
+        There are two section to consider here In the VERTICES section there is the listing of all of the vertices.
+        However, some of these vertices are not sequence representatives. To get the names we have to look in the TRANSLATE section
+        If the names vertices are not in there then just give the name as 'no_name' for the time being."""
+        # First get a list of all of the vertices
+        for i in range(len(self.splits_net_block)):
+            if self.splits_net_block[i] == 'VERTICES':
+                # for each line in the translate section
+                for j in range(i + 1, len(self.splits_net_block)):
+                    if self.splits_net_block[j] == ';':
+                        # then we have reached the end of the translation section
+                        break
+                    items = self.splits_net_block[j].replace('\'', '').replace(',', '').split(' ')
+                    self.vertice_list.append(items[0])
+
         for i in range(len(self.splits_net_block)):
             if self.splits_net_block[i] == 'TRANSLATE':
                 # for each line in the translate section
@@ -285,8 +318,11 @@ class Fasta2Net:
                         break
                     items = self.splits_net_block[j].replace('\'', '').replace(',', '').split(' ')
                     self.vertice_id_to_seq_id_dict[items[0]].extend(items[1:])
-
-        self.vertice_list = list(self.vertice_id_to_seq_id_dict.keys())
+        name_count = 0
+        for ver in self.vertice_list:
+            if ver not in self.vertice_id_to_seq_id_dict:
+                self.vertice_id_to_seq_id_dict[ver] = f'no_name_{name_count}'
+                name_count += 1
 
     def _run_splits_trees_and_extract_net_block(self):
         # Run splitstree
@@ -362,7 +398,7 @@ class Fasta2Net:
 
         # now create the df from the list of series
         # https://github.com/pandas-dev/pandas/issues/1494
-        aligned_fasta_as_df = pd.DataFrame.from_items([(s.name, s) for s in temp_series_list]).T
+        aligned_fasta_as_df = pd.DataFrame.from_dict({s.name: s for s in temp_series_list}).T
         # aligned_fasta_as_df = pd.DataFrame(temp_series_list)
 
         # now do the cropping
@@ -562,10 +598,10 @@ if __name__ == "__main__":
     parser.add_argument("--no_labels", help="If this flag is passed, seq labels will not be plotted. [false]",
                         action="store_true", default=False)
     parser.add_argument("--fig_res", help="The resolution (dpi) to output the .png to. [1200]", type=int, default=1200)
-    args = parser.parse_args(["--input_fasta_path", "data/test_one_with_name.fasta", "--output_dir", "data", "--input_names_path", "data/test_one_with_name.names"])
-    # args = parser.parse_args()
-    # for arg_val in args:
-    #     print(arg_val)
+    # args = parser.parse_args(["--input_fasta_path", "data/test_one_with_name.fasta", "--output_dir", "data", "--input_names_path", "data/test_one_with_name.names"])
+    args = parser.parse_args()
+    for arg in vars(args):
+        print(arg, getattr(args, arg))
     ftn = Fasta2Net(
         fasta_file_path=args.input_fasta_path,
         output_dir=args.output_dir,
