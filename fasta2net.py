@@ -14,41 +14,56 @@ import networkx as nx
 from collections import defaultdict
 import pandas as pd
 import matplotlib as mpl
-mpl.use('TkAgg')
+mpl.use('agg')
 import matplotlib.pyplot as plt
 import argparse
 from Bio import SeqIO
-
+import hashlib
 
 
 class Fasta2Net:
     def __init__(
-            self, fasta_file_path ,output_dir=None,  names_file_path=None, color_map_file_path=None,
-            spring_pos_iterations=1000, spring_pos_k_value=0.1, labels=True, dpi=1200):
+            self, fasta_file_path ,output_dir=None,  names_file_path=None, abundance_dictionary=None,
+            color_map_file_path=None, spring_pos_iterations=1000, spring_pos_k_value=0.1,
+            labels=True, dpi=1200):
+
+        # Three input methods
+        # 1 - Just fasta
+        # 2 - Fasta and .names file
+        # 3 - Abundance dictionary that is key = sequence, value = abundance
+        # For all formats, and abundance dictionary will be created that is then
+        # used to create self.vert_record_dict[k] = VerticeRecord(rep_name=k, seq=fasta_dict[k].seq._data, abund=v)
 
         # Directories
         self.cwd = os.path.dirname(os.path.realpath(__file__))
         if output_dir is None:
             self.output_dir = self.cwd
         else:
-            if not os.path.exists(os.path.abspath(output_dir)):
-                os.makedirs(os.path.abspath(output_dir))
             self.output_dir = os.path.abspath(output_dir)
-
+            if not os.path.exists(self.output_dir):
+                os.makedirs(self.output_dir)
+            
         # Sequences
         self.fasta_file_path = os.path.abspath(fasta_file_path)
         self.fasta_extension = os.path.splitext(self.fasta_file_path)[1]
-        self.seqs_dict = {}
+        self.vert_record_dict = {}
         if names_file_path is not None:
             self.names_file_path = os.path.abspath(names_file_path)
-        else:
-            self.names_file_path = names_file_path
+        
+        
+        if abundance_dictionary is not None:
+            if fasta_file_path is not None or names_file_path is not None:
+                raise RunTimeError('Please provide an abundance dictionary OR fasta file OR fasta file/names file pair')
+            else:
+                self.abundance_dictionary = abundance_dictionary
+                for k, v in abund_dict.items():
+                    name_hash = hashlib.md5(k.encode('utf-8')).hexdigest()
+                    self.vert_record_dict[k] = VerticeRecord(rep_name=name_hash, seq=k, abund=v)
+        
         if self.names_file_path is None:
             self._init_seqs_list_no_names_file()
         else:
             self._init_seqs_list_with_names_file()
-
-
 
         # Command line variables
         self.color_dict = self._create_color_dict(color_map_file_path)
@@ -90,15 +105,15 @@ class Fasta2Net:
     def _set_nexus_fasta_in_path(self):
         return os.path.abspath(os.path.join(os.path.dirname(self.fasta_file_path), self.fasta_file_path.split('/')[-1].replace(self.fasta_extension, '_alignment_in{}'.format(self.fasta_extension))))
 
-    def _init_seqs_list_with_names_file(self):
+    def _init_vert_record_dict_with_names_file(self):
         # If name file present then there is no need to unique. We get abundances from
         # the names file
         abund_dict = self._create_names_dict()
         fasta_dict = SeqIO.to_dict(SeqIO.parse(self.fasta_file_path, "fasta"))
         for k, v in abund_dict.items():
-            self.seqs_dict[k] = VerticeRecord(rep_name=k, seq=fasta_dict[k].seq._data, abund=v)
+            self.vert_record_dict[k] = VerticeRecord(rep_name=k, seq=fasta_dict[k].seq._data, abund=v)
 
-    def _init_seqs_list_no_names_file(self):
+    def _init_vert_record_dict_no_names_file(self):
         # If no name file then we need to do the uniqueing of the fasta ourselves
         # dictionary that will hold sequence to representative name
         rep_seq_dict = {}
@@ -114,7 +129,7 @@ class Fasta2Net:
             else:
                 abund_dict[rep_seq_dict[sequence]] += 1
         for k, v in abund_dict.items():
-            self.seqs_dict[k] = VerticeRecord(rep_name=k, seq=fasta_dict[k].seq._data, abund=v)
+            self.vert_record_dict[k] = VerticeRecord(rep_name=k, seq=fasta_dict[k].seq._data, abund=v)
 
     def _set_aligned_fasta_interleaved_path(self):
         if self.fasta_extension not in ['.fasta', '.fas', '.fa']:
@@ -167,7 +182,7 @@ class Fasta2Net:
 
     def _write_out_fasta_for_nexus_in(self):
         with open(self.alignment_fasta_in_path, 'w') as f:
-            for vert_record in self.seqs_dict.values():
+            for vert_record in self.vert_record_dict.values():
                 f.write('>{}\n'.format(vert_record.rep_name))
                 f.write('{}\n'.format(vert_record.sequence))
 
@@ -278,13 +293,13 @@ class Fasta2Net:
                 continue
             count_id_list = self.vertice_id_to_seq_id_dict[vert_id]
             if len(count_id_list) == 1:
-                abund = self.seqs_dict[count_id_list[0]].abundance
+                abund = self.vert_record_dict[count_id_list[0]].abundance
                 self.vertice_id_to_abund_dict[vert_id] = abund
             elif len(count_id_list) > 1:
                 # then we need sum the abundances for each of them
                 tot = 0
                 for count_id in count_id_list:
-                    abund = self.seqs_dict[count_id].abundance
+                    abund = self.vert_record_dict[count_id].abundance
                     tot += abund
                 self.vertice_id_to_abund_dict[vert_id] = tot
 
@@ -436,11 +451,11 @@ class Fasta2Net:
             color_len = len(color_list)
             temp_count = 0
             temp_dict = {}
-            for seq in self.seqs_dict.values():
+            for vert_record in self.vert_record_dict.values():
                 if temp_count < color_len:
-                    temp_dict[seq.rep_name] = color_list[temp_count]
+                    temp_dict[vert_record.rep_name] = color_list[temp_count]
                 else:
-                    temp_dict[seq.rep_name] = grey_list[temp_count%6]
+                    temp_dict[vert_record.rep_name] = grey_list[temp_count%6]
                 temp_count += 1
             return temp_dict
         else:
@@ -448,7 +463,7 @@ class Fasta2Net:
                 colour_file = [line.rstrip() for line in f]
             temp_dict = {line.split(',')[0]: line.split(',')[1] for line in colour_file}
             # check that the seqs match the seqs in the colour dict
-            if set([vert.seq for vert in self.seqs_dict]) != set(temp_dict.keys()):
+            if set([vert.seq for vert in self.vert_record_dict]) != set(temp_dict.keys()):
                 raise RuntimeError('Sequence in the fasta file were not found in the color map file.')
             else:
                 return temp_dict
